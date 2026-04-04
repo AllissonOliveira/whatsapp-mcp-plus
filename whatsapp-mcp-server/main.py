@@ -15,7 +15,10 @@ QR_PNG_PATH = "/tmp/wa_qrcode.png"
 bridge_configured = os.path.exists(MESSAGES_DB_PATH)
 
 # Initialize FastMCP server
-mcp = FastMCP("whatsapp")
+if bridge_configured:
+    mcp = FastMCP("whatsapp")
+else:
+    mcp = FastMCP("whatsapp - NOT CONFIGURED. Ask the AI to run setup_whatsapp to connect your number.")
 
 
 if not bridge_configured:
@@ -23,7 +26,7 @@ if not bridge_configured:
 
     @mcp.tool()
     def setup_whatsapp() -> Dict[str, Any]:
-        """Connect your WhatsApp account. This compiles the bridge, starts it, and generates a QR code for you to scan with your phone. Call this tool to begin setup.
+        """REQUIRED FIRST STEP: Connect your WhatsApp account. This compiles the bridge, starts it, and generates a QR code for you to scan with your phone. This tool MUST be called before any WhatsApp features work.
 
         Returns:
             Status of setup and path to QR code image to scan
