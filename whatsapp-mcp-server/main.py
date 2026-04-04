@@ -105,31 +105,38 @@ if not bridge_configured:
                 "message": "Timed out waiting for QR code. Check if another bridge instance is already running."
             }
 
-        # Step 6: Generate QR code PNG
+        # Step 6: Generate QR code PNG and open it automatically
         qr_data = open(QR_DATA_PATH).read().strip()
         try:
-            subprocess.run(
-                [sys.executable, "-c",
-                 f"import qrcode; qrcode.make('{qr_data}').save('{QR_PNG_PATH}')"],
-                capture_output=True, timeout=10
-            )
+            import qrcode
+            img = qrcode.make(qr_data)
+            img.save(QR_PNG_PATH)
         except Exception:
-            pass  # QR PNG is optional, user can still use terminal QR
+            pass
 
+        # Step 7: Open the QR code image automatically
         if os.path.exists(QR_PNG_PATH):
+            try:
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", QR_PNG_PATH])
+                elif sys.platform == "win32":
+                    os.startfile(QR_PNG_PATH)
+                else:
+                    subprocess.Popen(["xdg-open", QR_PNG_PATH])
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "step": "qr_ready",
-                "message": f"QR code generated! Open this image and scan it with WhatsApp on your phone (Settings > Linked Devices > Link a Device). After scanning, restart the MCP server.",
-                "qr_image_path": QR_PNG_PATH,
-                "note": "The bridge is running in the background. After scanning the QR code, restart this MCP server to load all WhatsApp tools."
+                "message": "QR code opened on your screen. Scan it with WhatsApp (Settings > Linked Devices > Link a Device). After scanning, the bridge will connect automatically. Then restart this MCP server to load all WhatsApp tools.",
+                "qr_image_path": QR_PNG_PATH
             }
         else:
             return {
-                "success": True,
-                "step": "qr_ready",
-                "message": f"Bridge is running. QR code is displayed in the bridge terminal. Scan it with WhatsApp on your phone. After scanning, restart this MCP server.",
-                "note": "If you can't see the terminal QR, install qrcode package: pip install qrcode"
+                "success": False,
+                "step": "qr_generate",
+                "message": "Could not generate QR code image. Install qrcode: pip install qrcode[pil]"
             }
 
 else:
