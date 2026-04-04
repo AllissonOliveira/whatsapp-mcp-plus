@@ -1,6 +1,7 @@
 #!/bin/bash
 
-BRIDGE="$HOME/.claude/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BRIDGE="$SCRIPT_DIR/whatsapp-bridge/whatsapp-bridge"
 LOG="/tmp/whatsapp-bridge.log"
 QR_DATA="/tmp/wa_qr_data.txt"
 QR_PNG="/tmp/wa_qrcode.png"

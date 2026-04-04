@@ -1,5 +1,26 @@
+import sys
+import os
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
+from whatsapp import MESSAGES_DB_PATH
+
+# Check if WhatsApp bridge has been set up
+if not os.path.exists(MESSAGES_DB_PATH):
+    print(
+        "ERROR: WhatsApp bridge not configured.\n"
+        "\n"
+        "No message database found. You need to set up the WhatsApp bridge first:\n"
+        "\n"
+        "  1. cd whatsapp-bridge\n"
+        "  2. go build -o whatsapp-bridge main.go\n"
+        "  3. ./whatsapp-bridge\n"
+        "  4. Scan the QR code with your WhatsApp app\n"
+        "\n"
+        "After authenticating, restart this MCP server.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
