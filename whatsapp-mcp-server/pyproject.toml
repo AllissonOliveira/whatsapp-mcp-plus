@@ -1,0 +1,11 @@
+[project]
+name = "whatsapp-mcp-server"
+version = "0.1.0"
+description = "Enhanced WhatsApp MCP server with LID support, optimized performance and auto-reconnection"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp[cli]>=1.10.1",
+    "requests>=2.32.3",
+]
