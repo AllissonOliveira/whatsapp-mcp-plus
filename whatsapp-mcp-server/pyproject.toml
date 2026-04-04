@@ -8,4 +8,5 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.10.1",
     "requests>=2.32.3",
+    "qrcode[pil]>=7.4",
 ]
