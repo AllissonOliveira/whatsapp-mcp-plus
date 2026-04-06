@@ -35,8 +35,9 @@ try:
     img.save('$QR_PNG')
 except: pass
 " 2>/dev/null
-        # Abre o QR automaticamente
+        # Fecha preview anterior e abre o novo QR
         if [ -f "$QR_PNG" ]; then
+            osascript -e 'tell application "Preview" to close (every window whose name contains "wa_qrcode")' 2>/dev/null
             open "$QR_PNG" 2>/dev/null || xdg-open "$QR_PNG" 2>/dev/null
         fi
         osascript -e "display notification \"QR code aberto — escaneie com o WhatsApp\" with title \"WhatsApp Bridge\" sound name \"Ping\"" 2>/dev/null

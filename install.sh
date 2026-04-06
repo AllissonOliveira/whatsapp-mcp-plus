@@ -88,7 +88,7 @@ build_bridge() {
     echo ""
     echo -e "  ${BOLD}Compilando bridge Go...${RESET}"
     cd "$BRIDGE_DIR"
-    go build -o whatsapp-bridge main.go
+    CGO_ENABLED=1 go build -o whatsapp-bridge main.go
     ok "Bridge compilado"
     cd "$SCRIPT_DIR"
 }
