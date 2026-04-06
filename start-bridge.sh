@@ -24,7 +24,7 @@ sleep 1
         :
     fi
 
-    # Auto-generate QR PNG and notify when QR data file is updated
+    # Auto-generate QR PNG, open it and notify
     if echo "$line" | grep -q "QR data saved"; then
         sleep 0.5
         python3 -c "
@@ -35,7 +35,11 @@ try:
     img.save('$QR_PNG')
 except: pass
 " 2>/dev/null
-        osascript -e "display notification \"Abra /tmp/wa_qrcode.png e escaneie com o WhatsApp\" with title \"WhatsApp Bridge — QR Code\" sound name \"Ping\"" 2>/dev/null
+        # Abre o QR automaticamente
+        if [ -f "$QR_PNG" ]; then
+            open "$QR_PNG" 2>/dev/null || xdg-open "$QR_PNG" 2>/dev/null
+        fi
+        osascript -e "display notification \"QR code aberto — escaneie com o WhatsApp\" with title \"WhatsApp Bridge\" sound name \"Ping\"" 2>/dev/null
     fi
 
     # Notify on successful connection

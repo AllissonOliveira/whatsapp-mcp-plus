@@ -925,6 +925,7 @@ func main() {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 				os.WriteFile("/tmp/wa_qr_data.txt", []byte(evt.Code), 0644)
+				fmt.Println("QR data saved to /tmp/wa_qr_data.txt")
 			} else if evt.Event == "success" {
 				connected <- true
 				break
