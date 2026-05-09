@@ -1057,25 +1057,6 @@ func main() {
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
 
-	// Periodic history sync
-	go func() {
-		// Initial sync after connection stabilizes
-		time.Sleep(10 * time.Second)
-		if client.IsConnected() {
-			requestHistorySync(client)
-		}
-
-		// Periodic sync every 30 minutes
-		ticker := time.NewTicker(30 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			if client.IsConnected() {
-				logger.Infof("Requesting periodic history sync...")
-				requestHistorySync(client)
-			}
-		}
-	}()
-
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
 	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
@@ -1313,42 +1294,6 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
-}
-
-// Request history sync from the server
-func requestHistorySync(client *whatsmeow.Client) {
-	if client == nil {
-		fmt.Println("Client is not initialized. Cannot request history sync.")
-		return
-	}
-
-	if !client.IsConnected() {
-		fmt.Println("Client is not connected. Please ensure you are connected to WhatsApp first.")
-		return
-	}
-
-	if client.Store.ID == nil {
-		fmt.Println("Client is not logged in. Please scan the QR code first.")
-		return
-	}
-
-	// Build and send a history sync request
-	historyMsg := client.BuildHistorySyncRequest(nil, 100)
-	if historyMsg == nil {
-		fmt.Println("Failed to build history sync request.")
-		return
-	}
-
-	_, err := client.SendMessage(context.Background(), types.JID{
-		Server: "s.whatsapp.net",
-		User:   "status",
-	}, historyMsg)
-
-	if err != nil {
-		fmt.Printf("Failed to request history sync: %v\n", err)
-	} else {
-		fmt.Println("History sync requested. Waiting for server response...")
-	}
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
