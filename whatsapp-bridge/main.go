@@ -21,8 +21,6 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mdp/qrterminal"
-
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -1017,11 +1015,8 @@ func main() {
 			return
 		}
 
-		// Print QR code for pairing with phone
 		for evt := range qrChan {
 			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 				os.WriteFile("/tmp/wa_qr_data.txt", []byte(evt.Code), 0644)
 				fmt.Println("QR data saved to /tmp/wa_qr_data.txt")
 			} else if evt.Event == "success" {

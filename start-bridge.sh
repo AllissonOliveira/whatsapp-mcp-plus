@@ -40,16 +40,5 @@ except: pass
             osascript -e 'tell application "Preview" to close (every window whose name contains "wa_qrcode")' 2>/dev/null
             open "$QR_PNG" 2>/dev/null || xdg-open "$QR_PNG" 2>/dev/null
         fi
-        osascript -e "display notification \"QR code aberto — escaneie com o WhatsApp\" with title \"WhatsApp Bridge\" sound name \"Ping\"" 2>/dev/null
-    fi
-
-    # Notify on successful connection
-    if echo "$line" | grep -q "Successfully authenticated"; then
-        osascript -e "display notification \"WhatsApp Bridge conectado com sucesso\" with title \"WhatsApp Bridge\" sound name \"Glass\"" 2>/dev/null
-    fi
-
-    # Notify on logout
-    if echo "$line" | grep -q "logged out"; then
-        osascript -e "display notification \"Sessão encerrada — reconectando...\" with title \"WhatsApp Bridge\" sound name \"Basso\"" 2>/dev/null
-    fi
+        fi
 done
