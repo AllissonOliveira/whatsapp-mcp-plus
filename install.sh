@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE_DIR="$SCRIPT_DIR/whatsapp-bridge"
 MCP_SERVER_DIR="$SCRIPT_DIR/whatsapp-mcp-server"
 CLAUDE_JSON="$HOME/.claude.json"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist"
 
 echo ""
 echo -e "${BOLD}  WhatsApp MCP Plus — Instalacao${RESET}"
@@ -98,7 +99,6 @@ register_mcp() {
     echo ""
     echo -e "  ${BOLD}Registrando MCP no Claude Code...${RESET}"
 
-    # Cria claude.json se nao existe
     if [ ! -f "$CLAUDE_JSON" ]; then
         echo '{}' > "$CLAUDE_JSON"
     fi
@@ -122,33 +122,46 @@ with open(path, 'w') as f:
     ok "WhatsApp MCP registrado em ~/.claude.json"
 }
 
-# ---------- Iniciar bridge e abrir QR ----------
-start_and_pair() {
+# ---------- Registrar bridge como daemon do sistema (macOS) ----------
+register_launchd() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        aviso "Launchd nao disponivel neste sistema. Inicie o bridge manualmente com: $SCRIPT_DIR/start-bridge.sh"
+        return 0
+    fi
+
     echo ""
-    echo -e "  ${BOLD}Iniciando bridge e gerando QR code...${RESET}"
-    echo -e "  ${YELLOW}Quando a imagem do QR abrir, escaneie com o WhatsApp.${RESET}"
-    echo -e "  ${YELLOW}(WhatsApp > Configuracoes > Aparelhos conectados > Conectar)${RESET}"
-    echo ""
+    echo -e "  ${BOLD}Registrando bridge como daemon do sistema...${RESET}"
 
     chmod +x "$SCRIPT_DIR/start-bridge.sh"
-    "$SCRIPT_DIR/start-bridge.sh" &
-    BRIDGE_PID=$!
+    mkdir -p "$HOME/Library/LaunchAgents"
 
-    # Espera ate 3 minutos pela autenticacao
-    TIMEOUT=180
-    ELAPSED=0
-    while [ $ELAPSED -lt $TIMEOUT ]; do
-        if grep -q "Successfully authenticated" /tmp/whatsapp-bridge.log 2>/dev/null; then
-            echo ""
-            ok "WhatsApp conectado com sucesso!"
-            return 0
-        fi
-        sleep 2
-        ELAPSED=$((ELAPSED + 2))
-    done
+    cat > "$PLIST_PATH" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.whatsapp-mcp.bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$SCRIPT_DIR/start-bridge.sh</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/whatsapp-bridge-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/whatsapp-bridge-launchd.log</string>
+</dict>
+</plist>
+PLIST_EOF
 
-    aviso "Timeout esperando autenticacao. Voce pode tentar depois com: $SCRIPT_DIR/start-bridge.sh"
-    return 0
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    launchctl load "$PLIST_PATH"
+    ok "Bridge registrado como daemon — inicia automaticamente no login e reinicia se craschar"
 }
 
 # ============================================================================
@@ -160,21 +173,14 @@ check_uv
 check_qrcode
 build_bridge
 register_mcp
-
-echo ""
-echo -e "  ${BOLD}Quer conectar ao WhatsApp agora?${RESET}"
-echo -e "  ${BOLD}1${RESET} - Sim, conectar agora"
-echo -e "  ${BOLD}2${RESET} - Nao, conecto depois"
-echo ""
-read -p "  Escolha: " choice
-
-if [ "$choice" = "1" ]; then
-    start_and_pair
-else
-    echo ""
-    ok "Para conectar depois, execute: $SCRIPT_DIR/start-bridge.sh"
-fi
+register_launchd
 
 echo ""
 echo -e "${GREEN}${BOLD}  WhatsApp MCP instalado com sucesso!${RESET}"
+echo ""
+echo -e "  ${YELLOW}Proximos passos:${RESET}"
+echo -e "  1. Abra o Claude Code"
+echo -e "  2. Chame a ferramenta ${BOLD}setup_whatsapp${RESET}"
+echo -e "  3. Escaneie o QR code com o WhatsApp"
+echo -e "  4. Reinicie o Claude Code"
 echo ""

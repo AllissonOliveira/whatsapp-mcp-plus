@@ -7,10 +7,12 @@ from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
 from whatsapp import MESSAGES_DB_PATH
 
-BRIDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge')
+BRIDGE_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge'))
 BRIDGE_BINARY = os.path.join(BRIDGE_DIR, 'whatsapp-bridge')
+START_SCRIPT = os.path.abspath(os.path.join(BRIDGE_DIR, '..', 'start-bridge.sh'))
 QR_DATA_PATH = "/tmp/wa_qr_data.txt"
 QR_PNG_PATH = "/tmp/wa_qrcode.png"
+PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist")
 
 bridge_configured = os.path.exists(MESSAGES_DB_PATH)
 
@@ -21,12 +23,39 @@ else:
     mcp = FastMCP("whatsapp - NOT CONFIGURED. Ask the AI to run setup_whatsapp to connect your number.")
 
 
+def _write_launchd_plist() -> None:
+    os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.whatsapp-mcp.bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{START_SCRIPT}</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/whatsapp-bridge-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/whatsapp-bridge-launchd.log</string>
+</dict>
+</plist>"""
+    with open(PLIST_PATH, 'w') as f:
+        f.write(plist)
+
+
 if not bridge_configured:
     # --- SETUP MODE: only expose setup tool ---
 
     @mcp.tool()
     def setup_whatsapp() -> Dict[str, Any]:
-        """REQUIRED FIRST STEP: Connect your WhatsApp account. This compiles the bridge, starts it, and generates a QR code for you to scan with your phone. This tool MUST be called before any WhatsApp features work.
+        """REQUIRED FIRST STEP: Connect your WhatsApp account. Compiles the bridge, registers it as a system daemon (auto-starts on login), and generates a QR code to scan. After scanning, the bridge runs permanently in background.
 
         Returns:
             Status of setup and path to QR code image to scan
@@ -60,52 +89,45 @@ if not bridge_configured:
                     "message": "Compilation timed out after 120 seconds."
                 }
 
-        # Step 3: Clean old QR data
+        # Step 3: Clean old QR artifacts so polling is reliable
         for f in [QR_DATA_PATH, QR_PNG_PATH]:
             if os.path.exists(f):
                 os.remove(f)
 
-        # Step 4: Start bridge in background
-        bridge_process = subprocess.Popen(
-            [BRIDGE_BINARY],
-            cwd=BRIDGE_DIR,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-
-        # Step 5: Wait for QR code data to be written
-        qr_found = False
-        for _ in range(60):  # wait up to 60 seconds
-            time.sleep(1)
-            if os.path.exists(QR_DATA_PATH):
-                qr_found = True
-                break
-            # Check if bridge died
-            if bridge_process.poll() is not None:
-                output = bridge_process.stdout.read() if bridge_process.stdout else ""
-                # If it connected without QR (existing session), check for DB
-                if os.path.exists(MESSAGES_DB_PATH):
-                    return {
-                        "success": True,
-                        "step": "complete",
-                        "message": "WhatsApp bridge connected with existing session. Restart the MCP server to load all tools."
-                    }
+        # Step 4: Register and start as launchd daemon (macOS) or run directly (Linux)
+        if sys.platform == "darwin":
+            _write_launchd_plist()
+            subprocess.run(["launchctl", "unload", PLIST_PATH], capture_output=True)
+            result = subprocess.run(["launchctl", "load", PLIST_PATH], capture_output=True)
+            if result.returncode != 0:
                 return {
                     "success": False,
-                    "step": "bridge_start",
-                    "message": f"Bridge exited unexpectedly: {output[:500]}"
+                    "step": "launchd",
+                    "message": f"Failed to load launchd service: {result.stderr.decode()}"
+                }
+        else:
+            subprocess.Popen(["/bin/bash", START_SCRIPT])
+
+        # Step 5: Wait for QR or session restore (start-bridge.sh starts the bridge)
+        for _ in range(60):
+            time.sleep(1)
+            if os.path.exists(QR_DATA_PATH):
+                break
+            if os.path.exists(MESSAGES_DB_PATH):
+                return {
+                    "success": True,
+                    "step": "complete",
+                    "message": "WhatsApp bridge connected with existing session. Bridge is now running as a system daemon. Restart the MCP server to load all tools."
                 }
 
-        if not qr_found:
-            bridge_process.terminate()
+        if not os.path.exists(QR_DATA_PATH):
             return {
                 "success": False,
                 "step": "qr_wait",
-                "message": "Timed out waiting for QR code. Check if another bridge instance is already running."
+                "message": "Timed out waiting for QR code. Check /tmp/whatsapp-bridge-launchd.log for errors."
             }
 
-        # Step 6: Generate QR code PNG and open it automatically
+        # Step 6: Generate QR PNG (start-bridge.sh may have already done this — generate as fallback)
         qr_data = open(QR_DATA_PATH).read().strip()
         try:
             import qrcode
@@ -114,22 +136,17 @@ if not bridge_configured:
         except Exception:
             pass
 
-        # Step 7: Open the QR code image automatically
+        # Step 7: Open PNG
         if os.path.exists(QR_PNG_PATH):
             try:
-                if sys.platform == "darwin":
-                    subprocess.Popen(["open", QR_PNG_PATH])
-                elif sys.platform == "win32":
-                    os.startfile(QR_PNG_PATH)
-                else:
-                    subprocess.Popen(["xdg-open", QR_PNG_PATH])
+                subprocess.Popen(["open", QR_PNG_PATH])
             except Exception:
                 pass
 
             return {
                 "success": True,
                 "step": "qr_ready",
-                "message": "QR code opened on your screen. Scan it with WhatsApp (Settings > Linked Devices > Link a Device). After scanning, the bridge will connect automatically. Then restart this MCP server to load all WhatsApp tools.",
+                "message": "QR code aberto na tela. Escaneie com o WhatsApp (Configurações > Aparelhos conectados > Conectar). O bridge vai continuar rodando em background automaticamente — inclusive após reiniciar o Mac. Após escanear, reinicie o MCP server para carregar todas as ferramentas.",
                 "qr_image_path": QR_PNG_PATH
             }
         else:
