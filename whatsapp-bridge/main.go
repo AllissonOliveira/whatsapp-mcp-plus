@@ -1,26 +1,27 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
-
-	"bytes"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -35,11 +36,28 @@ const (
 	initialReconnectBackoff = 5 * time.Second
 	maxReconnectBackoff     = 5 * time.Minute
 	reconnectBackoffFactor  = 2.0
+	maxRuntimeRetries       = 10
 )
 
+// reconnecting guards against concurrent reconnect goroutines (0=idle, 1=reconnecting)
+var reconnecting int32
+
+// connectWithRetry retries indefinitely — used at startup only.
 func connectWithRetry(client *whatsmeow.Client, logger waLog.Logger) error {
+	return connectWithRetryCtx(context.Background(), client, logger, 0)
+}
+
+// connectWithRetryCtx retries up to maxAttempts (0 = infinite) with exponential backoff.
+// Respects ctx cancellation during backoff sleeps.
+func connectWithRetryCtx(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, maxAttempts int) error {
 	backoff := initialReconnectBackoff
-	for attempt := 1; ; attempt++ {
+	for attempt := 1; maxAttempts == 0 || attempt <= maxAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		logger.Infof("Connection attempt %d...", attempt)
 		err := client.Connect()
 		if err == nil {
@@ -51,12 +69,19 @@ func connectWithRetry(client *whatsmeow.Client, logger waLog.Logger) error {
 			err = fmt.Errorf("connection did not stabilize")
 		}
 		logger.Warnf("Attempt %d failed: %v. Retrying in %v...", attempt, err, backoff)
-		time.Sleep(backoff)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
 		backoff = time.Duration(float64(backoff) * reconnectBackoffFactor)
 		if backoff > maxReconnectBackoff {
 			backoff = maxReconnectBackoff
 		}
 	}
+	return fmt.Errorf("exhausted %d reconnect attempts", maxAttempts)
 }
 
 // Message represents a chat message for our client
@@ -82,9 +107,21 @@ func NewMessageStore() (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	// _busy_timeout: Python reader waits up to 10s instead of failing immediately on lock
+	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_busy_timeout=10000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
+	}
+
+	// WAL mode: allows Python to read while Go is writing concurrently
+	if _, err = db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL mode: %v", err)
+	}
+	// NORMAL is safe with WAL and reduces fsync calls without corruption risk
+	if _, err = db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set synchronous mode: %v", err)
 	}
 
 	// Create tables if they don't exist
@@ -220,14 +257,24 @@ func extractTextContent(msg *waProto.Message) string {
 		return ""
 	}
 
-	// Try to get text content
 	if text := msg.GetConversation(); text != "" {
 		return text
-	} else if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		return extendedText.GetText()
 	}
-
-	// For now, we're ignoring non-text messages
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		return ext.GetText()
+	}
+	if loc := msg.GetLocationMessage(); loc != nil {
+		return fmt.Sprintf("[Location: %.6f,%.6f]", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+	}
+	if contact := msg.GetContactMessage(); contact != nil {
+		return fmt.Sprintf("[Contact: %s]", contact.GetDisplayName())
+	}
+	if reaction := msg.GetReactionMessage(); reaction != nil {
+		return fmt.Sprintf("[Reaction: %s]", reaction.GetText())
+	}
+	if poll := msg.GetPollCreationMessage(); poll != nil {
+		return fmt.Sprintf("[Poll: %s]", poll.GetName())
+	}
 	return ""
 }
 
@@ -697,30 +744,56 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	return true, mediaType, filename, absPath, nil
 }
 
-// Extract direct path from a WhatsApp media URL
-func extractDirectPathFromURL(url string) string {
-	// The direct path is typically in the URL, we need to extract it
-	// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/13812002_698058036224062_3424455886509161511_n.enc?ccb=11-4&oh=...
-
-	// Find the path part after the domain
-	parts := strings.SplitN(url, ".net/", 2)
-	if len(parts) < 2 {
-		return url // Return original URL if parsing fails
+// extractDirectPathFromURL extracts the CDN direct path from a WhatsApp media URL.
+// WhatsApp CDN paths start with "v/" (no leading slash) — using strings.Index on the
+// raw URL avoids the leading slash that url.Parse().Path would add, which would break
+// the downstream whatsmeow Download call.
+func extractDirectPathFromURL(rawURL string) string {
+	// Validate that this looks like a real URL
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
 	}
 
-	pathPart := parts[1]
+	// Known WhatsApp CDN path prefixes
+	for _, marker := range []string{"/v/", "/d/", "/g/"} {
+		idx := strings.Index(rawURL, marker)
+		if idx == -1 {
+			continue
+		}
+		// rawURL[idx] == '/', so rawURL[idx+1:] gives "v/..." without leading slash
+		path := rawURL[idx+1:]
+		// Strip query string and fragment
+		if q := strings.IndexAny(path, "?#"); q != -1 {
+			path = path[:q]
+		}
+		return path
+	}
 
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
+	// Fallback: return path without leading slash
+	p := strings.TrimLeft(u.Path, "/")
+	return p
+}
 
-	// Create proper direct path format
-	return "/" + pathPart
+// apiKeyMiddleware returns a handler that checks X-Api-Key header when WHATSAPP_API_KEY is set.
+// If the env var is empty, all requests pass through (backward compatible).
+func apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	apiKey := os.Getenv("WHATSAPP_API_KEY")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if apiKey != "" && r.Header.Get("X-Api-Key") != apiKey {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	mux := http.NewServeMux()
+
 	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/send", apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -763,10 +836,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Success: success,
 			Message: message,
 		})
-	})
+	}))
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/download", apiKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -814,13 +887,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Filename: filename,
 			Path:     path,
 		})
-	})
+	}))
 
-	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+	// /api/status is public — used by health checks and setup_whatsapp detection
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
 			"connected": client.IsConnected(),
 			"logged_in": client.Store.ID != nil,
+			"state":     "running",
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		}
 		json.NewEncoder(w).Encode(status)
@@ -832,7 +907,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.ListenAndServe(serverAddr, mux); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
@@ -890,19 +965,42 @@ func main() {
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			// Process regular messages
 			handleMessage(client, messageStore, v, logger)
 
 		case *events.HistorySync:
-			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			// Clear reconnect flag if a background retry succeeded
+			atomic.StoreInt32(&reconnecting, 0)
+
+		case *events.Disconnected:
+			// events.Disconnected = network drop, not logout
+			// Use CompareAndSwap to ensure only one goroutine reconnects at a time
+			if atomic.CompareAndSwapInt32(&reconnecting, 0, 1) {
+				go func() {
+					defer atomic.StoreInt32(&reconnecting, 0)
+					if client.Store.ID == nil {
+						logger.Warnf("Disconnected but no session stored — skipping reconnect")
+						return
+					}
+					logger.Infof("Disconnected, reconnecting (max %d attempts)...", maxRuntimeRetries)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+					defer cancel()
+					if err := connectWithRetryCtx(ctx, client, logger, maxRuntimeRetries); err != nil {
+						logger.Errorf("Reconnect failed: %v", err)
+					}
+				}()
+			}
 
 		case *events.LoggedOut:
 			logger.Warnf("Logged out! Session invalidated. Restart bridge to re-authenticate.")
 			fmt.Println("LOGGED_OUT: Session invalidated. Restart bridge to re-authenticate.")
+
+		// Suppress unused variable warning for v
+		default:
+			_ = v
 		}
 	})
 
@@ -1364,14 +1462,6 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 	return duration, waveform, nil
 }
 
-// min returns the smaller of x or y
-func min(x, y int) int {
-	if x < y {
-		return x
-	}
-	return y
-}
-
 // placeholderWaveform generates a synthetic waveform for WhatsApp voice messages
 // that appears natural with some variability based on the duration
 func placeholderWaveform(duration uint32) []byte {
@@ -1379,15 +1469,15 @@ func placeholderWaveform(duration uint32) []byte {
 	const waveformLength = 64
 	waveform := make([]byte, waveformLength)
 
-	// Seed the random number generator for consistent results with the same duration
-	rand.Seed(int64(duration))
-
-	// Create a more natural looking waveform with some patterns and variability
-	// rather than completely random values
+	rng := rand.New(rand.NewPCG(uint64(duration), 0))
 
 	// Base amplitude and frequency - longer messages get faster frequency
 	baseAmplitude := 35.0
-	frequencyFactor := float64(min(int(duration), 120)) / 30.0
+	durationCap := int(duration)
+	if durationCap > 120 {
+		durationCap = 120
+	}
+	frequencyFactor := float64(durationCap) / 30.0
 
 	for i := range waveform {
 		// Position in the waveform (normalized 0-1)
@@ -1399,7 +1489,7 @@ func placeholderWaveform(duration uint32) []byte {
 		val += (baseAmplitude / 2) * math.Sin(pos*math.Pi*frequencyFactor*16)
 
 		// Add some randomness to make it look more natural
-		val += (rand.Float64() - 0.5) * 15
+		val += (rng.Float64() - 0.5) * 15
 
 		// Add some fade-in and fade-out effects
 		fadeInOut := math.Sin(pos * math.Pi)

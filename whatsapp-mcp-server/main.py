@@ -283,6 +283,7 @@ else:
     @mcp.tool()
     def get_message_context(
         message_id: str,
+        chat_jid: str,
         before: int = 5,
         after: int = 5
     ) -> Dict[str, Any]:
@@ -290,10 +291,11 @@ else:
 
         Args:
             message_id: The ID of the message to get context for
+            chat_jid: The JID of the chat containing the message (required — message IDs are only unique within a chat)
             before: Number of messages to include before the target message (default 5)
             after: Number of messages to include after the target message (default 5)
         """
-        context = whatsapp_get_message_context(message_id, before, after)
+        context = whatsapp_get_message_context(message_id, chat_jid, before, after)
         return context
 
     @mcp.tool()
