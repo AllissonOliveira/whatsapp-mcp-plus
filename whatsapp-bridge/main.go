@@ -1018,7 +1018,7 @@ func main() {
 		for evt := range qrChan {
 			if evt.Event == "code" {
 				os.WriteFile("/tmp/wa_qr_data.txt", []byte(evt.Code), 0644)
-				fmt.Println("QR data saved to /tmp/wa_qr_data.txt")
+				fmt.Println("QR_NEEDED")
 			} else if evt.Event == "success" {
 				connected <- true
 				break
@@ -1040,6 +1040,7 @@ func main() {
 			logger.Errorf("Failed to connect after retries: %v", err)
 			return
 		}
+		fmt.Println("SESSION_RESTORED")
 		connected <- true
 	}
 

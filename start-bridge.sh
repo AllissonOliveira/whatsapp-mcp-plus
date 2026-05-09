@@ -5,27 +5,33 @@ BRIDGE="$SCRIPT_DIR/whatsapp-bridge/whatsapp-bridge"
 LOG="/tmp/whatsapp-bridge.log"
 QR_DATA="/tmp/wa_qr_data.txt"
 QR_PNG="/tmp/wa_qrcode.png"
+LOCK="/tmp/whatsapp-bridge.lock"
 
-# Kill any existing bridge instances
+# Single-instance guard
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK")" 2>/dev/null; then
+    echo "Bridge já está rodando (PID $(cat "$LOCK"))"
+    exit 0
+fi
+
+# Kill stale processes and free port 8080
 pkill -f "whatsapp-bridge" 2>/dev/null
-sleep 2
-
-# Free port 8080 if still in use
 lsof -ti :8080 | xargs kill -9 2>/dev/null
 sleep 1
 
-# Start bridge and monitor output
-"$BRIDGE" 2>&1 | while IFS= read -r line; do
-    echo "$line" >> "$LOG"
+# Clean old QR artifacts
+rm -f "$QR_DATA" "$QR_PNG"
 
-    # Save QR data when detected
-    if echo "$line" | grep -q "Scan this QR code"; then
-        # Next non-empty line will be QR data - captured by instaloader patch
-        :
-    fi
+# Start bridge in background
+"$BRIDGE" > "$LOG" 2>&1 &
+BRIDGE_PID=$!
+echo "$BRIDGE_PID" > "$LOCK"
+trap "rm -f '$LOCK'" EXIT
 
-    # Auto-generate QR PNG, open it and notify
-    if echo "$line" | grep -q "QR data saved"; then
+# Monitor log — only open QR PNG when SESSION is new (QR_NEEDED signal)
+QR_OPENED=0
+while kill -0 "$BRIDGE_PID" 2>/dev/null; do
+    if [ "$QR_OPENED" -eq 0 ] && grep -q "QR_NEEDED" "$LOG" 2>/dev/null; then
+        QR_OPENED=1
         sleep 0.5
         python3 -c "
 import qrcode
@@ -35,10 +41,12 @@ try:
     img.save('$QR_PNG')
 except: pass
 " 2>/dev/null
-        # Fecha preview anterior e abre o novo QR
         if [ -f "$QR_PNG" ]; then
             osascript -e 'tell application "Preview" to close (every window whose name contains "wa_qrcode")' 2>/dev/null
             open "$QR_PNG" 2>/dev/null || xdg-open "$QR_PNG" 2>/dev/null
         fi
-        fi
+    fi
+    sleep 1
 done
+
+wait "$BRIDGE_PID"
